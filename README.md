@@ -3,3 +3,6 @@ auto-track characters/karts/tracks/coins/laps/splits for time trials in mario ka
 
 
 `venv\Scripts\activate`
+
+
+`main-image-with-timegrab.py` is very successful
