@@ -1,9 +1,8 @@
 import cv2
 import numpy as np
 from utils import find_obs_camera
-from paddleocr import PaddleOCR
-from difflib import get_close_matches
 
+# Your character and kart lists
 KNOWN_CHARACTERS = [
     "Mario",
     "Luigi",
@@ -203,69 +202,85 @@ KNOWN_KARTS = [
     "Pipe Frame",
 ]
 
-def extract_text_from_roi(frame, ocr):
-    """Extract character/kart name and optional type from ROI"""
-    # Full ROI
-    roi = frame[808:970, 1210:1770]
+def load_templates():
+    """Load all character and kart templates"""
+    templates = {
+        'characters': {},
+        'karts': {}
+    }
     
-    # Split into name (top ~60%) and type (bottom ~40%)
-    roi_height = roi.shape[0]
-    split_point = int(roi_height * 0.6)
+    # Load character templates
+    for char in KNOWN_CHARACTERS:
+        filename = char.replace('(', '').replace(')', '').replace('.', '').replace(' ', '_').lower() + '.png'
+        img = cv2.imread(f'images/characters/{filename}', cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            templates['characters'][char] = img
     
-    name_roi = roi[0:split_point, :]
-    type_roi = roi[split_point:, :]
+    # Load kart templates
+    for kart in KNOWN_KARTS:
+        filename = kart.replace('(', '').replace(')', '').replace('.', '').replace(' ', '_').lower() + '.png'
+        img = cv2.imread(f'images/karts/{filename}', cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            templates['karts'][kart] = img
     
-    # OCR both regions
-    name_result = ocr.predict(name_roi)
-    type_result = ocr.predict(type_roi)
-    
-    # Extract text
-    name_text = ""
-    type_text = ""
-    
-    if name_result and name_result[0]:
-        rec_texts = name_result[0].get('rec_texts', [])
-        if rec_texts:
-            name_text = ' '.join(rec_texts).strip()
-    
-    if type_result and type_result[0]:
-        rec_texts = type_result[0].get('rec_texts', [])
-        if rec_texts:
-            type_text = ' '.join(rec_texts).strip()
-    
-    return name_text, type_text
+    return templates
 
-def match_character_or_kart(name_text, type_text):
-    """Match against known characters or karts using fuzzy matching"""
-    # Try matching as character with skin (Name + Type)
-    if type_text:
-        full_text = f"{name_text} ({type_text})"
-        char_matches = get_close_matches(full_text, KNOWN_CHARACTERS, n=1, cutoff=0.6)
-        if char_matches:
-            return "character", char_matches[0]
+def detect_character_or_kart(frame, templates, char_roi_coords, kart_roi_coords, threshold=0.9):
+    """Detect both character and kart in one pass"""
+    char_x1, char_y1, char_x2, char_y2 = char_roi_coords
+    kart_x1, kart_y1, kart_x2, kart_y2 = kart_roi_coords
+    
+    # Extract and preprocess character ROI
+    char_roi = frame[char_y1:char_y2, char_x1:char_x2]
+    char_gray = cv2.cvtColor(char_roi, cv2.COLOR_BGR2GRAY)
+    _, char_thresh = cv2.threshold(char_gray, 170, 255, cv2.THRESH_BINARY)
+    
+    # Extract and preprocess kart ROI
+    kart_roi = frame[kart_y1:kart_y2, kart_x1:kart_x2]
+    kart_gray = cv2.cvtColor(kart_roi, cv2.COLOR_BGR2GRAY)
+    _, kart_thresh = cv2.threshold(kart_gray, 170, 255, cv2.THRESH_BINARY)
+    
+    # Match character
+    best_char = None
+    best_char_score = 0
+    
+    for name, template in templates['characters'].items():
+        if template.shape[0] > char_thresh.shape[0] or template.shape[1] > char_thresh.shape[1]:
+            continue
         
-        # Try without parentheses in case OCR missed them
-        char_matches = get_close_matches(name_text, KNOWN_CHARACTERS, n=1, cutoff=0.6)
-        if char_matches:
-            return "character", char_matches[0]
+        result = cv2.matchTemplate(char_thresh, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+        
+        if max_val > best_char_score:
+            best_char_score = max_val
+            best_char = name
     
-    # Try matching as character without skin
-    char_matches = get_close_matches(name_text, KNOWN_CHARACTERS, n=1, cutoff=0.6)
-    if char_matches:
-        return "character", char_matches[0]
+    # Match kart
+    best_kart = None
+    best_kart_score = 0
     
-    # Try matching as kart
-    kart_matches = get_close_matches(name_text, KNOWN_KARTS, n=1, cutoff=0.6)
-    if kart_matches:
-        return "kart", kart_matches[0]
+    for name, template in templates['karts'].items():
+        if template.shape[0] > kart_thresh.shape[0] or template.shape[1] > kart_thresh.shape[1]:
+            continue
+        
+        result = cv2.matchTemplate(kart_thresh, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+        
+        if max_val > best_kart_score:
+            best_kart_score = max_val
+            best_kart = name
     
-    # No match found
-    return None, f"{name_text} ({type_text})" if type_text else name_text
+    # Only return if above threshold
+    char_result = (best_char, best_char_score) if best_char_score >= threshold else (None, best_char_score)
+    kart_result = (best_kart, best_kart_score) if best_kart_score >= threshold else (None, best_kart_score)
+    
+    return char_result, kart_result
 
-# Initialize PaddleOCR
-print("Loading OCR...")
-ocr = PaddleOCR(use_textline_orientation=True, lang='en')
-print("OCR loaded!")
+# Load templates
+print("Loading templates...")
+templates = load_templates()
+print(f"Loaded {len(templates['characters'])} character templates")
+print(f"Loaded {len(templates['karts'])} kart templates")
 
 # Open camera
 camera_index = find_obs_camera()
@@ -273,17 +288,18 @@ cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-# ROI coordinates
-ROI_X1, ROI_Y1 = 1210, 808
-ROI_X2, ROI_Y2 = 1770, 970
+print("Camera opened. Press 'q' to quit\n")
 
-# Track last detected character and kart
+# ROI coordinates - adjusted to match preprocessing crops
+CHAR_X1, CHAR_Y1 = 1210, 828  # 808 + 20 (top crop)
+CHAR_X2, CHAR_Y2 = 1770, 960  # 970 - 10 (bottom crop)
+
+KART_X1, KART_Y1 = 1240, 828  # 1210 + 30, 808 + 20
+KART_X2, KART_Y2 = 1740, 950  # 1770 - 30, 970 - 20
+
+# Track last detected
 last_character = None
 last_kart = None
-
-print("Detecting character/kart selection... Press 'q' to quit")
-print(f"Current character: {last_character}")
-print(f"Current kart: {last_kart}")
 
 while True:
     ret, frame = cap.read()
@@ -292,34 +308,35 @@ while True:
         print("Failed to grab frame")
         break
     
-    # Extract text from ROI
-    name_text, type_text = extract_text_from_roi(frame, ocr)
+    # Detect both at once
+    char_result, kart_result = detect_character_or_kart(
+        frame, templates,
+        (CHAR_X1, CHAR_Y1, CHAR_X2, CHAR_Y2),
+        (KART_X1, KART_Y1, KART_X2, KART_Y2)
+    )
     
-    # Only process if we detected some text
-    if name_text:
-        # Match against known lists
-        detection_type, matched_text = match_character_or_kart(name_text, type_text)
-        
-        if detection_type == "character" and matched_text != last_character:
-            last_character = matched_text
-            print(f"\n🎮 Character selected: {last_character}")
-        elif detection_type == "kart" and matched_text != last_kart:
-            last_kart = matched_text
-            print(f"\n🏎️ Kart selected: {last_kart}")
-        elif detection_type is None:
-            # Unknown text detected - show what we got
-            print(f"❓ Unknown: '{matched_text}' (Raw: name='{name_text}', type='{type_text}')")
+    char_name, char_conf = char_result
+    kart_name, kart_conf = kart_result
     
-    # Draw ROI rectangle for visualization
-    cv2.rectangle(frame, (ROI_X1, ROI_Y1), (ROI_X2, ROI_Y2), (0, 255, 255), 2)
+    # Update if changed
+    if char_name and char_name != last_character:
+        last_character = char_name
+        print(f"🎮 Character: {last_character} (confidence: {char_conf:.3f})")
     
-    # Display current selections on frame
-    cv2.putText(frame, f"Character: {last_character}", (50, 50), 
+    if kart_name and kart_name != last_kart:
+        last_kart = kart_name
+        print(f"🏎️ Kart: {last_kart} (confidence: {kart_conf:.3f})")
+    
+    # Draw ROI rectangles
+    cv2.rectangle(frame, (CHAR_X1, CHAR_Y1), (CHAR_X2, CHAR_Y2), (0, 255, 255), 2)
+    cv2.rectangle(frame, (KART_X1, KART_Y1), (KART_X2, KART_Y2), (255, 0, 255), 2)
+    
+    # Display current selections
+    cv2.putText(frame, f"Character: {last_character or 'None'}", (50, 50), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    cv2.putText(frame, f"Kart: {last_kart}", (50, 100), 
+    cv2.putText(frame, f"Kart: {last_kart or 'None'}", (50, 100), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
     
-    # Display frame
     cv2.imshow('Character/Kart Detection', frame)
     
     if cv2.waitKey(1) & 0xFF == ord('q'):
